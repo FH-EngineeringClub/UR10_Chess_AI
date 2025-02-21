@@ -1,7 +1,7 @@
 # === Robot Configuration ===
 
 robot:
-  hostname: "192.168.12.16" # IP address of your Universal Robot
+  hostname: "192.168.2.81" # IP address of your Universal Robot
   host_port: 30002 # Port to send commands to the robot
   rtde_frequency: 10 # Frequency to update data from robot (Hz)
 

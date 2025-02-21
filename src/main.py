@@ -1,5 +1,5 @@
 """
-This script is used to control the UR10 robot to play chess against the Stockfish chess engine.
+This script controls a UR10 robot to play chess against the Stockfish chess engine.
 """
 
 import platform
@@ -22,159 +22,243 @@ from robot_api.api import (
     remove_piece,
 )
 
-# Load configuration from config.yaml
-with open("config.yaml", "r") as config_file:
-    config = yaml.safe_load(config_file)
+class ChessGame:
+    def __init__(self, config_path="config.yaml"):
+        self.config = self.load_config(config_path)
+        self.piece_heights = self.config["piece_heights"]
+        self.stockfish_difficulty = self.config["stockfish_difficulty_level"]
+        self.stockfish_path = self.get_stockfish_path()
+        self.zero_player_mode = self.get_zero_player_mode()
+        self.board = self.initialize_board()
+        self.stockfish = self.initialize_stockfish()
+        self.chess_vision_mode = False
+        self.chessviz = None
+        self.lock = None
+        self.setup_vision()
 
-# Piece Heights
-PIECE_HEIGHTS = config["piece_heights"]
+    def load_config(self, config_path):
+        with open(config_path, "r") as config_file:
+            return yaml.safe_load(config_file)
 
-# Stockfish Difficulty Levels
-stockfish_difficulty_level = config["stockfish_difficulty_level"]
-
-
-osSystem = platform.system()  # Get the OS
-if osSystem == "Darwin" or osSystem == "Linux":
-    stockfishPath = subprocess.run(
-        ["which", "stockfish"], capture_output=True, text=True, check=True
-    ).stdout.strip("\n")  # noqa: E501
-elif osSystem == "Windows":
-    stockfishPath = subprocess.run(
-        ["where", "stockfish"], capture_output=True, text=True
-    )
-    stockfishPath = stockfishPath.stdout.strip()
-else:
-    exit("No binary or executable found for stockfish")
-
-zero_player_mode = input(
-    Fore.LIGHTGREEN_EX
-    + "Would you like to let stockfish play against itself? (no player input) (y/N)"
-)
-
-if zero_player_mode.lower() == "y":
-    print(Fore.LIGHTMAGENTA_EX + "Entering zero player mode!")
-    zero_player_mode = "TRUE"
-    chess_vision_mode = False  # No need for vision in zero-player mode
-else:
-    print(Fore.GREEN + "Continuing with normal mode!")
-    chess_vision_mode = input(
-        Fore.LIGHTMAGENTA_EX
-        + "Would you like to let the computer"
-        + " detect human moves autonomously. (press space to"
-        + " confirm human's move) (y/N)"
-    )
-    if chess_vision_mode.lower() == "y":
-        print(Fore.GREEN + "Continuing with chess vision mode!")
-        chess_vision_mode = True
-
-        # Import ChessViz only if chess vision mode is enabled
-        from vision.chessviz import ChessViz
-
-        chessviz = ChessViz(
-            config["vision"]["board_corners"][0],
-            config["vision"]["board_corners"][1],
-            cam_index=config["vision"]["cam_index"],
-        )
-
-        # Initialize vision thread and lock
-        sample_size = config["vision"]["sample_size"]
-        vision_thread = threading.Thread(
-            target=chessviz.chess_array_update_thread, args=(sample_size,)
-        )
-        vision_thread.start()
-        lock = threading.Lock()
-    else:
-        chess_vision_mode = False
-
-
-start_new_game = input(
-    Fore.YELLOW + "Would you like to continue the last saved game? (Y/n)"
-)
-if start_new_game != "y" and start_new_game != "Y" and start_new_game != "":
-    board = chess.Board()  # Create a new board
-    print(Fore.GREEN + "New game started!")
-    print(board)
-else:
-    try:
-        with open("lastgame.txt", "r", encoding="utf-8") as file:
-            lastgame = file.read()
-            board = chess.Board(lastgame)  # Load the last saved game
-            print(board)
-            print(Fore.GREEN + "Last game loaded!")
-    except FileNotFoundError:
-        board = chess.Board()
-        print(Fore.RED + "No last game found, starting new game!")
-        print(board)
-
-
-def display_board():
-    """
-    Display the chess board by writing it to a SVG file.
-    """
-    with open(
-        "chess.svg", "w", encoding="utf-8"
-    ) as file_obj:  # Open a file to write to with explicit encoding
-        file_obj.write(chess.svg.board(board))  # Write the board to the file
-
-
-def save_last_play():
-    """
-    Save the last played game to a text file.
-    """
-    with open(
-        "lastgame.txt", "w", encoding="utf-8"
-    ) as file_obj:  # Open a file to write to with explicit encoding
-        file_obj.write(board.fen())  # Write the board to the file
-
-
-# Opening UR10 head positions JSON file
-with open("setup.json", encoding="utf-8") as f:
-    data = json.load(f)
-
-
-stockfish = Stockfish(path=stockfishPath)
-stockfish.set_depth(8)  # How deep the AI looks
-# stockfish.set_skill_level(20)  # Set the difficulty based skill level
-# stockfish.set_elo_rating(1500)  # Set the difficulty based on elo rating
-stockfish.get_parameters()  # Get all the parameters of stockfish
-
-display_board()  # Display the board
-
-if zero_player_mode == "TRUE":
-    random_number = random.randint(2000, 3000)
-    stockfish.set_elo_rating(random_number)
-else:
-    difficulty = input("Enter the difficulty level (easy, medium, expert, gm): ")
-    if difficulty == "":
-        difficulty = "easy"
-        elo_rating = stockfish_difficulty_level.get(difficulty)
-        stockfish.set_elo_rating(stockfish_difficulty_level.get(difficulty))
-        print(
-            Fore.GREEN + "Difficulty level set to",
-            difficulty,
-            "with ELO rating",
-            elo_rating,
-        )
-    else:
+    def get_stockfish_path(self):
+        os_system = platform.system()
+        command = "which" if os_system in ("Darwin", "Linux") else "where"
         try:
-            elo_rating = stockfish_difficulty_level.get(difficulty)
-            stockfish.set_elo_rating(elo_rating)
-            print(
-                Fore.GREEN + "Difficulty level set to",
-                difficulty,
-                "with ELO rating",
-                elo_rating,
+            result = subprocess.run([command, "stockfish"], capture_output=True, text=True, check=True)
+            return result.stdout.strip("\n")
+        except subprocess.CalledProcessError:
+            raise Exception("No binary or executable found for stockfish")
+
+    def initialize_board(self):
+        start_new_game = input(Fore.YELLOW + "Continue last game? (Y/n): ")
+        if start_new_game.lower() != "y":
+            print(Fore.GREEN + "New game started!")
+            return chess.Board()
+        try:
+            with open("lastgame.txt", "r", encoding="utf-8") as file:
+                lastgame = file.read()
+                print(Fore.GREEN + "Last game loaded!")
+                return chess.Board(lastgame)
+        except FileNotFoundError:
+            print(Fore.RED + "No last game found, starting new game!")
+            return chess.Board()
+
+    def initialize_stockfish(self):
+        stockfish = Stockfish(path=self.stockfish_path)
+        stockfish.set_depth(8)
+        if self.zero_player_mode:
+            random_number = random.randint(2000, 3000)
+            stockfish.set_elo_rating(random_number)
+        else:
+            difficulty = input("Enter difficulty (easy, medium, expert, gm): ") or "easy"
+            try:
+                elo_rating = self.stockfish_difficulty[difficulty]
+                stockfish.set_elo_rating(elo_rating)
+                print(Fore.GREEN + f"Difficulty set to {difficulty} (ELO {elo_rating})")
+            except KeyError:
+                print(Fore.RED + "Invalid difficulty level")
+                exit()
+        return stockfish
+
+    def get_zero_player_mode(self):
+        zero_player_mode = input(Fore.LIGHTGREEN_EX + "Zero player mode? (y/N): ")
+        return zero_player_mode.lower() == "y"
+
+    def setup_vision(self):
+        chess_vision_mode = input(Fore.LIGHTMAGENTA_EX + "Use chess vision? (y/N): ")
+        self.chess_vision_mode = chess_vision_mode.lower() == "y"
+        if self.chess_vision_mode:
+            from vision.chessviz import ChessViz  # Import only when needed
+            vision_config = self.config["vision"]
+            self.chessviz = ChessViz(
+                vision_config["board_corners"][0],
+                vision_config["board_corners"][1],
+                cam_index=vision_config["cam_index"],
             )
-        except StockfishException:
-            print(Fore.RED + "Invalid difficulty level")
-            exit()
+            self.lock = threading.Lock()
+            sample_size = self.config["vision"]["sample_size"]
+            vision_thread = threading.Thread(
+                target=self.chessviz.chess_array_update_thread, args=(sample_size,)
+            )
+            vision_thread.start()
+
+    def display_board(self):
+        with open("chess.svg", "w", encoding="utf-8") as file_obj:
+            file_obj.write(chess.svg.board(self.board))
+
+    def save_last_play(self):
+        with open("lastgame.txt", "w", encoding="utf-8") as file_obj:
+            file_obj.write(self.board.fen())
+
+    def process_move(self, move_str):
+        try:
+            move = chess.Move.from_uci(move_str)
+            if move in self.board.legal_moves:
+                self.board.push(move)
+                return True
+            else:
+                print(Fore.RED + "Illegal move.")
+                return False
+        except ValueError:
+            print(Fore.RED + "Invalid move format.")
+            return False
+
+    def handle_stockfish_move(self):
+        self.stockfish.set_fen_position(self.board.fen())
+        best_move = self.stockfish.get_top_moves(1)[0]["Move"]
+        uci_format_best_move = chess.Move.from_uci(best_move)
+        target_square = uci_format_best_move.to_square
+        origin_square = uci_format_best_move.from_square
+
+        move = best_move
+        move_pos = Move(self.piece_heights, self.board, data, move)
+        if self.board.piece_at(target_square):
+            print(Fore.CYAN + f"Space occupied by {self.board.piece_at(target_square)}, removing...")
+            move_pos.main_remove_piece()
+
+        move_pos.main_direct_move_piece()
+        self.board.push_san(best_move)
+        print(Fore.GREEN + f"Stockfish moves: {best_move}")
+
+    def update_board_with_vision(self, chess_array):
+        new_fen = self.convert_to_cfen(chess_array)
+        for move in self.board.legal_moves:
+            self.board.push(move)
+            if new_fen == self.board.fen().split(" ")[0]:
+                return True
+            self.board.pop()
+        return False
+
+    def convert_to_cfen(self, chess_array):  # same as before
+        rows = []
+        for i in range(7, -1, -1):
+            row = ""
+            empty_count = 0
+            for j in range(8):
+                piece = chess_array[i][j]
+                if piece == ".":
+                    empty_count += 1
+                else:
+                    if empty_count > 0:
+                        row += str(empty_count)
+                        empty_count = 0
+                    row += piece
+
+            if empty_count > 0:
+                row += str(empty_count)
+            rows.append(row)
+
+        cfen = "/".join(rows)
+        return cfen
+
+    def run(self):
+        with open("setup.json", encoding="utf-8") as f: # Only open once
+            global data # make data available to Move class
+            data = json.load(f)
+        while not self.board.is_game_over():
+            self.display_board()
+            self.save_last_play()
+            if self.zero_player_mode:
+                self.handle_stockfish_move()
+            else:
+                if self.board.turn == chess.WHITE:
+                    print(Fore.WHITE + "White to move")
+                    move_to_square()
+                    print(Fore.CYAN + "Moving to bin position...")
+                    print(Fore.WHITE + "Legal moves:")
+                    for move in self.board.legal_moves:
+                        move_type = ""
+                        if self.board.is_castling(move):
+                            move_type = "Castling "
+                        elif self.board.is_en_passant(move):
+                            move_type = "En Passant "
+                        elif self.board.is_capture(move):
+                            move_type = "Capture "
+                        print(Fore.LIGHTRED_EX + move_type + move.uci(), end=" ")
+
+                    if self.chess_vision_mode:
+                        while True:
+                            print("\n", "Press enter key to register move.")
+                            connectToButton()
+                            listenForButton()
+
+                            self.chessviz.counter_on.clear()
+                            self.chessviz.counter_on.wait()
+
+                            with self.lock:
+                                chess_array = self.chessviz.chess_array
+                                print(chess_array)
+
+                            valid_input = self.update_board_with_vision(chess_array)
+
+                            if valid_input:
+                                break
+
+                            print("Illegal move, please try again.")
+                    else:
+                        while True:  # Loop for valid user input
+                            inputmove = input(
+                                "\n"
+                                + Fore.BLUE
+                                + "Input move (SAN or UCI, 'undo'):"
+                            )
+
+                            if inputmove.lower() == "undo":
+                                print("Undoing last move...")
+                                try:
+                                    for _ in range(2):  # Undo two moves (user and stockfish)
+                                        self.board.pop()
+                                except IndexError:
+                                    print(Fore.RED + "No moves to undo")
+                                self.display_board()
+                                self.save_last_play()
+                                break  # Exit the input loop after undo
+                            else:
+                                if self.process_move(inputmove):
+                                    break # Exit the loop if the move is valid
+                    if not self.chess_vision_mode and inputmove.lower() != "undo": # Only ask for confirmation if not vision mode and not undoing
+                        user_confirmation = input(Fore.YELLOW + "Confirm move? (y/N): ")
+                        if user_confirmation.lower() != "y":
+                            self.board.pop() # Undo the move if not confirmed
+                            print(Fore.RED + "Move not confirmed.")
+                            continue # Go to the next turn
+                        
+                    if not self.chess_vision_mode or inputmove.lower() != "undo": # Only handle stockfish move if not vision mode or undoing
+                        self.handle_stockfish_move()
+
+                else:
+                    print(Fore.YELLOW + "Robot is on wrong side, skipping turn")
+                    self.board.push_san("0000")  # Push a blank move to the board
+                    self.save_last_play()  # Save the last played move
+
+        move_to_square()
+        print(Fore.CYAN + "Moving to bin position...")
+        print(self.board.outcome())
+        print(Fore.GREEN + "Game over!")
+        disconnect_from_robot()
 
 
 class Move:
-    """
-    Class to represent move of a piece from one position to another on the chess board
-    """
-
     def __init__(
         self,
         piece_heights,
@@ -182,16 +266,18 @@ class Move:
         position_data,
         current_move,
     ):
-        move_from = current_move[:2]  # from square
-        move_to = current_move[-2:]  # to square
+        self.board = current_board
+        move_from = current_move[:2]
+        move_to = current_move[-2:]
         print(move_from, move_to)
         from_position = position_data[move_from]
         to_position = position_data[move_to]
         from_piece_type = current_board.piece_at(chess.parse_square(move_from))
         to_piece_type = current_board.piece_at(chess.parse_square(move_to))
         print(from_piece_type, to_piece_type)
+
         if to_piece_type is None:
-            to_piece_type = from_piece_type
+            to_piece_type = from_piece_type  # Handle cases where no piece is on target square
         to_position_height = piece_heights[to_piece_type.symbol()]
         from_position_height = piece_heights[from_piece_type.symbol()]
 
@@ -202,326 +288,30 @@ class Move:
         self.to_piece_type = to_piece_type
         self.move_from = move_from
         self.move_to = move_to
+        self.is_capture = current_board.is_capture(chess.Move.from_uci(current_move)) # Check if this move is a capture
 
     def main_direct_move_piece(self):
         """
         Directly move a piece from one position to another on the chess board
         """
+        origin_square = chess.parse_square(self.move_from)
         print(
             "Moving piece",
-            board.piece_at(origin_square),
+            self.board.piece_at(origin_square),
             "from",
             self.move_from,
             "to",
             self.move_to,
         )
-        direct_move_piece(self, REMOVING_PIECE)
+        # Determine REMOVING_PIECE dynamically based on capture
+        removing_piece = 1 if self.is_capture else 0 # If it's a capture, we're removing a piece
+        direct_move_piece(self, removing_piece)  # Pass removing_piece
 
     def main_remove_piece(self):
-        """
-        Remove a piece from the chess board
-        """
-        remove_piece(self, board, origin_square)
+        origin_square = chess.parse_square(self.move_from)
+        remove_piece(self, self.board, origin_square)
 
 
-# converts 2d array in san format to concise fen(cfen), i.e. a fen without values
-# for player turn, castling rights, etc.
-def convert_to_cfen(chess_array):
-    rows = []
-    for i in range(7, -1, -1):
-        row = ""
-        empty_count = 0
-        for j in range(8):
-            piece = chess_array[i][j]
-            if piece == ".":
-                empty_count += 1
-            else:
-                if empty_count > 0:
-                    row += str(empty_count)
-                    empty_count = 0
-                row += piece
-
-        if empty_count > 0:
-            row += str(empty_count)
-        rows.append(row)
-
-    cfen = "/".join(rows)
-    return cfen
-
-
-def update_board_with_vision(chess_array, board):
-    new_fen = convert_to_cfen(chess_array)
-    print("new fen: ", new_fen)
-
-    for move in board.legal_moves:
-        board.push(move)
-        print("exisiting fen: ", board.fen().split(" ")[0])
-        if new_fen == board.fen().split(" ")[0]:
-            return True
-        board.pop()
-
-    return False
-
-
-if chess_vision_mode:
-    sample_size = 20
-    vision_thread = threading.Thread(
-        target=chessviz.chess_array_update_thread, args=(sample_size,)
-    )
-    vision_thread.start()
-    lock = threading.Lock()
-
-
-while not board.is_game_over():
-    if zero_player_mode == "TRUE":
-        move_to_square()  # move to the side position
-        print(Fore.CYAN + "Moving to bin position...")
-        display_board()  # Update the board svg
-
-        save_last_play()  # Save the last played move
-
-        stockfish.set_fen_position(board.fen())  # Set the position of the board
-        bestMove = stockfish.get_top_moves(1)  # Get the best move
-        uci_format_bestMove = chess.Move.from_uci(bestMove[0]["Move"])
-        target_square = uci_format_bestMove.to_square
-        origin_square = uci_format_bestMove.from_square
-        if board.is_kingside_castling(uci_format_bestMove):
-            print("Stockfish is castling kingside")
-            if board.turn == chess.WHITE:
-                move = "e1g1"  # e.g. "e2e4" or "e7e5"
-            else:
-                move = "e8g8"  # e.g. "e2e4" or "e7e5"
-            REMOVING_PIECE = 0
-            move_pos = Move(PIECE_HEIGHTS, board, data, move)
-            move_pos.main_direct_move_piece()
-            if board.turn == chess.WHITE:
-                move = "h1f1"  # e.g. "e2e4" or "e7e5"
-            else:
-                move = "h8f8"  # e.g. "e2e4" or "e7e5"
-            move_pos = Move(PIECE_HEIGHTS, board, data, move)
-            move_pos.main_direct_move_piece()
-            save_last_play()  # Save the last played move
-        elif board.is_queenside_castling(uci_format_bestMove):
-            print("Stockfish is castling queenside")
-            if board.turn == chess.WHITE:
-                move = "e1c1"  # e.g. "e2e4" or "e7e5"
-            else:
-                move = "e8c8"  # e.g. "e2e4" or "e7e5"
-            REMOVING_PIECE = 0
-            move_pos = Move(PIECE_HEIGHTS, board, data, move)
-            move_pos.main_direct_move_piece()
-            if board.turn == chess.WHITE:
-                move = "a1d1"  # e.g. "e2e4" or "e7e5"
-            else:
-                move = "a8d8"  # e.g. "e2e4" or "e7e5"
-            move_pos = Move(PIECE_HEIGHTS, board, data, move)
-            move_pos.main_direct_move_piece()
-            save_last_play()  # Save the last played move
-
-        else:
-            print("Stockfish is not castling")
-
-            if board.piece_at(target_square) is None:
-                print(Fore.CYAN + "Space not occupied")
-                REMOVING_PIECE = 0
-
-                move = bestMove[0]["Move"]  # e.g. "e2e4" or "e7e5"
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                move_pos.main_direct_move_piece()
-                save_last_play()  # Save the last played move
-
-            else:
-                print(
-                    Fore.CYAN + "Space occupied by",
-                    board.piece_at(target_square),
-                    "removing piece...",
-                )
-                REMOVING_PIECE = 1
-
-                move = bestMove[0]["Move"]  # e.g. "e2e4" or "e7e5"
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                move_pos.main_remove_piece()
-                move_pos.main_direct_move_piece()
-                save_last_play()  # Save the last played move
-
-        print(
-            Fore.GREEN + "Stockfish moves:", board.push_san(bestMove[0]["Move"])
-        )  # Push the best move to the board
-
-        display_board()  # Update the board svg
-
-        save_last_play()  # Save the last played move
-
-    else:
-        if board.turn == chess.WHITE:
-            print(Fore.WHITE + "White to move")
-        else:
-            print(Fore.YELLOW + "Robot is on wrong side, skipping turn")
-            board.push_san("0000")  # Push a blank move to the board
-            save_last_play()  # Save the last played move
-            continue
-        move_to_square()  # move to the side position
-        print(Fore.CYAN + "Moving to bin position...")
-
-        print(Fore.WHITE + "Legal moves:")
-
-        for move in (
-            board.legal_moves
-        ):  # Print all the legal moves, including castling, en passant, and captures
-            if board.is_castling(move):
-                print(Fore.LIGHTRED_EX + "Castling " + move.uci(), end=" ")
-            elif board.is_en_passant(move):
-                print(Fore.LIGHTRED_EX + "En Passant " + move.uci(), end=" ")
-            elif board.is_capture(move):
-                print(Fore.LIGHTCYAN_EX + "Capture " + move.uci(), end=" ")
-            else:
-                print(Fore.WHITE + move.uci(), end=" ")
-
-        if chess_vision_mode:
-            while True:
-                print("\n", "Press enter key to register move.")
-                connectToButton()
-                listenForButton()
-
-                chessviz.counter_on.clear()
-                chessviz.counter_on.wait()
-
-                with lock:
-                    chess_array = chessviz.chess_array
-                    print(chess_array)
-
-                valid_input = update_board_with_vision(chess_array, board)
-
-                if valid_input:
-                    break
-
-                print("Illegal move, please try again.")
-        else:
-            inputmove = input(
-                "\n"
-                + Fore.BLUE
-                + "Input move from the following legal moves, or 'undo' to undo (SAN format):"
-            )  # Get the move from the user
-
-            user_confirmation = input(
-                Fore.YELLOW + "Are you sure you want to make this move? (Y/n)"
-            )
-            if (
-                user_confirmation != "y"
-                and user_confirmation != "Y"
-                and user_confirmation != ""
-            ):
-                print(
-                    Fore.RED + "Move not confirmed, please try again"
-                )  # If the user doesn't confirm the move, ask for a new move
-                continue  # Skip the rest of the loop and start from the beginning
-
-            if inputmove == "undo":
-                print("Undoing last move...")
-                try:
-                    for _ in range(2):
-                        board.pop()
-                except IndexError:
-                    print(Fore.RED + "No moves to undo")
-                display_board()
-                save_last_play()
-                continue
-            else:
-                try:
-                    valid_input = (
-                        chess.Move.from_uci(inputmove) in board.legal_moves
-                    )  # Check if the move is valid
-                except ValueError:
-                    print(Fore.RED + "Move is not in SAN format. Please try again.")
-                    continue
-
-            if valid_input:
-                board.push_san(inputmove)  # Push the move to the board
-
-        if valid_input:
-            display_board()  # Update the board svg
-
-            stockfish.set_fen_position(board.fen())  # Set the position of the board
-            bestMove = stockfish.get_top_moves(1)  # Get the best move
-            uci_format_bestMove = chess.Move.from_uci(bestMove[0]["Move"])
-            target_square = uci_format_bestMove.to_square
-            origin_square = uci_format_bestMove.from_square
-            if board.is_kingside_castling(uci_format_bestMove):
-                print("Stockfish is castling kingside")
-                if board.turn == chess.WHITE:
-                    move = "e1g1"  # e.g. "e2e4" or "e7e5"
-                else:
-                    move = "e8g8"  # e.g. "e2e4" or "e7e5"
-                REMOVING_PIECE = 0
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-
-                move_pos.main_direct_move_piece()
-                if board.turn == chess.WHITE:
-                    move = "h1f1"  # e.g. "e2e4" or "e7e5"
-                else:
-                    move = "h8f8"  # e.g. "e2e4" or "e7e5"
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-
-                move_pos.main_direct_move_piece()
-                save_last_play()  # Save the last played move
-            elif board.is_queenside_castling(uci_format_bestMove):
-                print("Stockfish is castling queenside")
-                if board.turn == chess.WHITE:
-                    move = "e1c1"  # e.g. "e2e4" or "e7e5"
-                else:
-                    move = "e8c8"  # e.g. "e2e4" or "e7e5"
-                REMOVING_PIECE = 0
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                move_pos.main_direct_move_piece()
-                if board.turn == chess.WHITE:
-                    move = "a1d1"  # e.g. "e2e4" or "e7e5"
-                else:
-                    move = "a8d8"  # e.g. "e2e4" or "e7e5"
-                move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                move_pos.main_direct_move_piece()
-                save_last_play()  # Save the last played move
-
-            else:
-                print("Stockfish is not castling")
-
-                if board.piece_at(target_square) is None:
-                    print(Fore.CYAN + "Space not occupied")
-                    REMOVING_PIECE = 0
-
-                    move = bestMove[0]["Move"]  # e.g. "e2e4" or "e7e5"
-                    move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                    move_pos.main_direct_move_piece()
-                    save_last_play()  # Save the last played move
-
-                else:
-                    print(
-                        Fore.CYAN + "Space occupied by",
-                        board.piece_at(target_square),
-                        "removing piece...",
-                    )
-                    REMOVING_PIECE = 1
-
-                    move = bestMove[0]["Move"]  # e.g. "e2e4" or "e7e5"
-                    move_pos = Move(PIECE_HEIGHTS, board, data, move)
-                    move_pos.main_remove_piece()
-                    move_pos.main_direct_move_piece()
-                    save_last_play()  # Save the last played move
-
-            print(
-                Fore.GREEN + "Stockfish moves:", board.push_san(bestMove[0]["Move"])
-            )  # Push the best move to the board
-
-            display_board()  # Update the board svg
-
-            save_last_play()  # Save the last played move
-        else:
-            print(Fore.RED + "Not a legal move, Please try again")
-
-
-move_to_square()  # move to the side position
-print(Fore.CYAN + "Moving to bin position...")
-
-print(board.outcome())  # Print the winner of the game
-print(Fore.GREEN + "Game over!")
-
-disconnect_from_robot()
+if __name__ == "__main__":
+    game = ChessGame()
+    game.run()

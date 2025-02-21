@@ -18,10 +18,6 @@ def connectToButton():
     except IOError:
         print(Fore.RED + "Could not connect to button")
 
-
-connectToButton()
-
-
 def listenForButton():
     gamepad.set_nonblocking(True)
     previous_state = 0
